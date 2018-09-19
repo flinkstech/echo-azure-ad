@@ -25,13 +25,12 @@ type (
 
 	// ActiveDirectory is like AuthSettings but with methods and stores internal states
 	ActiveDirectory struct {
-		ClientID       string
-		TenantID       string
-		ClientSecret   string
-		RedirectURI    string
-		Skipper        func(echo.Context) bool
-		sessionStoreID string
-		Keys           []gojwk.Key
+		ClientID     string
+		TenantID     string
+		ClientSecret string
+		RedirectURI  string
+		Skipper      func(echo.Context) bool
+		Keys         []gojwk.Key
 	}
 
 	stsPostData struct {
@@ -75,6 +74,8 @@ type (
 	}
 )
 
+var sessionStoreKey = "authenticatekey"
+
 // Init : returns an ActiveDirectory struct to be used outside the package
 func Init(settings *AuthSettings) *ActiveDirectory {
 	auth := &ActiveDirectory{}
@@ -82,7 +83,6 @@ func Init(settings *AuthSettings) *ActiveDirectory {
 	auth.TenantID = settings.TenantID
 	auth.RedirectURI = settings.RedirectURI
 	auth.ClientSecret = settings.ClientSecret
-	auth.sessionStoreID = uuid.New().String()
 	if settings.Skipper == nil {
 		auth.Skipper = func(c echo.Context) bool { return false }
 	} else {
@@ -91,13 +91,7 @@ func Init(settings *AuthSettings) *ActiveDirectory {
 	gob.Register(sessionStore{})
 	gob.Register(activeDirectoryClaims{})
 	gob.Register(MemberGroup{})
-	gob.Register(User{})
 	return auth
-}
-
-// DangerouslyRetrieveSessionStoreKey returns the key to auth session data
-func (a *ActiveDirectory) DangerouslyRetrieveSessionStoreKey() string {
-	return a.sessionStoreID
 }
 
 // ActiveDirectoryAuthentication is echo middleware
@@ -154,11 +148,11 @@ func (a *ActiveDirectory) ActiveDirectoryAuthentication(next echo.HandlerFunc) e
 }
 
 // GetUser returns a truncated list of user claims
-func (a *ActiveDirectory) GetUser(c echo.Context) interface{} {
+func GetUser(c echo.Context) User {
 	sess := session.Default(c)
-	store := sess.Get(a.sessionStoreID)
+	store := sess.Get(sessionStoreKey)
 	if store == nil {
-		return nil
+		return User{}
 	}
 
 	storeData := store.(sessionStore)
@@ -186,7 +180,7 @@ func (a *ActiveDirectory) SignOut(c echo.Context, redirectURI string) error {
 
 func (a *ActiveDirectory) sessionIsAuthenticated(c echo.Context) bool {
 	sess := session.Default(c)
-	store := sess.Get(a.sessionStoreID)
+	store := sess.Get(sessionStoreKey)
 	if store == nil {
 		return false
 	}
@@ -204,7 +198,7 @@ func (a *ActiveDirectory) sessionIsAuthenticated(c echo.Context) bool {
 func (a *ActiveDirectory) authenticateSession(c echo.Context, claims *activeDirectoryClaims, code string) {
 	sess := session.Default(c)
 	groups, _ := a.getGroups(code)
-	sess.Set(a.sessionStoreID, &sessionStore{
+	sess.Set(sessionStoreKey, &sessionStore{
 		IDToken: claims,
 		Groups:  groups,
 	})
