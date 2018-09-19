@@ -59,6 +59,14 @@ type (
 		jwt.StandardClaims
 	}
 
+	// FilteredClaims are claims with jwt and auth properties removed
+	FilteredClaims struct {
+		FamilyName string
+		GivenName  string
+		Username   string
+		Email      string
+	}
+
 	sessionStore struct {
 		IDToken *activeDirectoryClaims
 		Groups  []MemberGroup
@@ -117,7 +125,7 @@ func (a *ActiveDirectory) ActiveDirectoryAuthentication(next echo.HandlerFunc) e
 				return a.getKey(token.Header["kid"].(string))
 			})
 			if err != nil {
-				msg := "Failed to parse claims from id_token"
+				msg := "id_token invalid or absent"
 				return c.String(http.StatusInternalServerError, msg)
 			}
 
@@ -129,7 +137,7 @@ func (a *ActiveDirectory) ActiveDirectoryAuthentication(next echo.HandlerFunc) e
 				receivedNonce, _ := uuid.Parse(claims.Nonce)
 				if sentNonce == receivedNonce {
 					a.authenticateSession(c, claims, form.Code)
-					return next(c)
+					return c.Redirect(http.StatusFound, form.State)
 				}
 			}
 
@@ -190,16 +198,11 @@ func (a *ActiveDirectory) UserClaims(c echo.Context) interface{} {
 
 	storeData := store.(sessionStore)
 
-	return struct {
-		FamilyName string
-		GivenName  string
-		Username   string
-		Email      string
-	}{
+	return FilteredClaims{
 		FamilyName: storeData.IDToken.FamilyName,
 		GivenName:  storeData.IDToken.GivenName,
-		Username:   storeData.IDToken.Name,
-		Email:      storeData.IDToken.UniqueName,
+		Username:   storeData.IDToken.UniqueName,
+		Email:      storeData.IDToken.UPN,
 	}
 }
 
@@ -237,14 +240,11 @@ func (a *ActiveDirectory) authenticateSession(c echo.Context, claims *activeDire
 }
 
 func (a *ActiveDirectory) redirectToIdentityProvider(c echo.Context, nonce string) error {
-	//r := c.Request()
-	//requestURL := c.Scheme() + "://" + r.Host + r.URL.Path
-
 	fstring := ("https://login.microsoftonline.com/%s/oauth2/authorize?" +
 		"client_id=%s&response_type=id_token+code&redirect_uri=%s" +
-		"&response_mode=form_post&scope=openid&nonce=%s")
+		"&response_mode=form_post&scope=openid&state=%s&nonce=%s")
 
-	authEndpoint := fmt.Sprintf(fstring, a.TenantID, a.ClientID, a.RedirectURI, nonce)
+	authEndpoint := fmt.Sprintf(fstring, a.TenantID, a.ClientID, a.RedirectURI, c.Request().URL.Path, nonce)
 
 	return c.Redirect(http.StatusFound, authEndpoint)
 }
