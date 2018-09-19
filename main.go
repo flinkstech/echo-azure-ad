@@ -59,12 +59,14 @@ type (
 		jwt.StandardClaims
 	}
 
-	// FilteredClaims are claims with jwt and auth properties removed
-	FilteredClaims struct {
-		FamilyName string
-		GivenName  string
-		Username   string
-		Email      string
+	// User is a representation of the useful user data returned in an id token
+	User struct {
+		Username  string
+		FirstName string
+		LastName  string
+		Email     string
+		Groups    []string
+		Data      map[string]interface{}
 	}
 
 	sessionStore struct {
@@ -89,6 +91,7 @@ func Init(settings *AuthSettings) *ActiveDirectory {
 	gob.Register(sessionStore{})
 	gob.Register(activeDirectoryClaims{})
 	gob.Register(MemberGroup{})
+	gob.Register(User{})
 	return auth
 }
 
@@ -150,31 +153,12 @@ func (a *ActiveDirectory) ActiveDirectoryAuthentication(next echo.HandlerFunc) e
 	}
 }
 
-// MemberOfGroup accepts a group name, and returns true if the authenticated user
-// belongs to the group, false in any other case.
-func (a *ActiveDirectory) MemberOfGroup(c echo.Context, displayName string) bool {
+// GetUser returns a truncated list of user claims
+func (a *ActiveDirectory) GetUser(c echo.Context) interface{} {
 	sess := session.Default(c)
 	store := sess.Get(a.sessionStoreID)
 	if store == nil {
-		return false
-	}
-
-	storeData := store.(sessionStore)
-
-	for _, group := range storeData.Groups {
-		if group.DisplayName == displayName {
-			return true
-		}
-	}
-	return false
-}
-
-// MemberGroups returns the full list of group display names assocaited to the user
-func (a *ActiveDirectory) MemberGroups(c echo.Context) []string {
-	sess := session.Default(c)
-	store := sess.Get(a.sessionStoreID)
-	if store == nil {
-		return []string{}
+		return nil
 	}
 
 	storeData := store.(sessionStore)
@@ -185,24 +169,12 @@ func (a *ActiveDirectory) MemberGroups(c echo.Context) []string {
 		names = append(names, group.DisplayName)
 	}
 
-	return names
-}
-
-// UserClaims returns a truncated list of user claims
-func (a *ActiveDirectory) UserClaims(c echo.Context) interface{} {
-	sess := session.Default(c)
-	store := sess.Get(a.sessionStoreID)
-	if store == nil {
-		return nil
-	}
-
-	storeData := store.(sessionStore)
-
-	return FilteredClaims{
-		FamilyName: storeData.IDToken.FamilyName,
-		GivenName:  storeData.IDToken.GivenName,
-		Username:   storeData.IDToken.UniqueName,
-		Email:      storeData.IDToken.UPN,
+	return User{
+		LastName:  storeData.IDToken.FamilyName,
+		FirstName: storeData.IDToken.GivenName,
+		Username:  storeData.IDToken.UniqueName,
+		Email:     storeData.IDToken.UPN,
+		Groups:    names,
 	}
 }
 
