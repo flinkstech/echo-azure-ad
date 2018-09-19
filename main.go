@@ -161,6 +161,48 @@ func (a *ActiveDirectory) MemberOfGroup(c echo.Context, displayName string) bool
 	return false
 }
 
+// MemberGroups returns the full list of group display names assocaited to the user
+func (a *ActiveDirectory) MemberGroups(c echo.Context) []string {
+	sess := session.Default(c)
+	store := sess.Get(a.sessionStoreID)
+	if store == nil {
+		return []string{}
+	}
+
+	storeData := store.(sessionStore)
+
+	names := []string{}
+
+	for _, group := range storeData.Groups {
+		names = append(names, group.DisplayName)
+	}
+
+	return names
+}
+
+// UserClaims returns a truncated list of user claims
+func (a *ActiveDirectory) UserClaims(c echo.Context) interface{} {
+	sess := session.Default(c)
+	store := sess.Get(a.sessionStoreID)
+	if store == nil {
+		return nil
+	}
+
+	storeData := store.(sessionStore)
+
+	return struct {
+		FamilyName string
+		GivenName  string
+		Username   string
+		Email      string
+	}{
+		FamilyName: storeData.IDToken.FamilyName,
+		GivenName:  storeData.IDToken.GivenName,
+		Username:   storeData.IDToken.Name,
+		Email:      storeData.IDToken.UniqueName,
+	}
+}
+
 // SignOut redirects the client to the signout URL, which then performs a subsequent redirect
 func (a *ActiveDirectory) SignOut(c echo.Context, redirectURI string) error {
 	signOutURL := "https://login.microsoftonline.com/%s/oauth2/v2.0/logout?post_logout_redirect_uri=%s"
