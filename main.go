@@ -16,21 +16,23 @@ import (
 type (
 	// AuthSettings is used as an argument to Init
 	AuthSettings struct {
-		ClientID     string
-		TenantID     string
-		ClientSecret string
-		RedirectURI  string
-		Skipper      func(echo.Context) bool
+		ClientID            string
+		TenantID            string
+		ClientSecret        string
+		RedirectURI         string
+		Skipper             func(echo.Context) bool
+		IgnoreTokenLifetime bool
 	}
 
 	// ActiveDirectory is like AuthSettings but with methods and stores internal states
 	ActiveDirectory struct {
-		ClientID     string
-		TenantID     string
-		ClientSecret string
-		RedirectURI  string
-		Skipper      func(echo.Context) bool
-		Keys         []gojwk.Key
+		ClientID            string
+		TenantID            string
+		ClientSecret        string
+		RedirectURI         string
+		Skipper             func(echo.Context) bool
+		IgnoreTokenLifetime bool
+		Keys                []gojwk.Key
 	}
 
 	stsPostData struct {
@@ -87,6 +89,11 @@ func Init(settings *AuthSettings) *ActiveDirectory {
 		auth.Skipper = func(c echo.Context) bool { return false }
 	} else {
 		auth.Skipper = settings.Skipper
+	}
+	if settings.IgnoreTokenLifetime == true {
+		auth.IgnoreTokenLifetime = true
+	} else {
+		auth.IgnoreTokenLifetime = false
 	}
 	gob.Register(sessionStore{})
 	gob.Register(activeDirectoryClaims{})
@@ -188,7 +195,13 @@ func (a *ActiveDirectory) sessionIsAuthenticated(c echo.Context) bool {
 	storeData := store.(sessionStore)
 
 	expiresAt := storeData.IDToken.StandardClaims.ExpiresAt
+	notBefore := storeData.IDToken.StandardClaims.NotBefore
+
 	if expiresAt > time.Now().Unix() {
+		return true
+	}
+
+	if a.IgnoreTokenLifetime && (time.Now().Unix() > notBefore) {
 		return true
 	}
 
