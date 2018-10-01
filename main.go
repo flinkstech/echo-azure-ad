@@ -123,7 +123,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 		return func(ec echo.Context) error {
 			c := &AuthContext{ec}
 			c.Set(contextStoreKey, &authValues{
-				c.user(),
+				c.userFromSession(),
 				a.ClientID,
 				a.TenantID,
 				settings.RedirectURI(ec),
@@ -188,7 +188,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 	}
 }
 
-func (ac AuthContext) user() *User {
+func (ac AuthContext) userFromSession() *User {
 	// Retrieve data from session, if it exists
 	sess := session.Default(ac)
 	if sess == nil {
@@ -255,7 +255,7 @@ func (ac AuthContext) User() *User {
 			return values.User
 		}
 	}
-	return ac.user()
+	return defaultAnonymousUser()
 }
 
 // Protect wrapps handlers to verify authentication at the group or route level.
