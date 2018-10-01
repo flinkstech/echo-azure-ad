@@ -57,7 +57,7 @@ func getKeysFromMicrosoft(tenantID string) ([]gojwk.Key, error) {
 	return keys.Keys, nil
 }
 
-func (a *ActiveDirectory) getKey(kid string) (*rsa.PublicKey, error) {
+func (a *activeDirectory) getKey(kid string) (*rsa.PublicKey, error) {
 	// Cycle through our saved keys
 	for _, key := range a.Keys {
 		if key.Kid == kid {

@@ -16,23 +16,21 @@ import (
 type (
 	// AuthSettings is used as an argument to Init
 	AuthSettings struct {
-		ClientID            string
-		TenantID            string
-		ClientSecret        string
-		RedirectURI         string
-		Skipper             func(echo.Context) bool
-		IgnoreTokenLifetime bool
+		ClientID     string
+		TenantID     string
+		ClientSecret string
+		RedirectURI  func(echo.Context) string
+		Skipper      func(echo.Context) bool
 	}
 
 	// ActiveDirectory is like AuthSettings but with methods and stores internal states
-	ActiveDirectory struct {
-		ClientID            string
-		TenantID            string
-		ClientSecret        string
-		RedirectURI         string
-		Skipper             func(echo.Context) bool
-		IgnoreTokenLifetime bool
-		Keys                []gojwk.Key
+	activeDirectory struct {
+		ClientID     string
+		TenantID     string
+		ClientSecret string
+		RedirectURI  func(echo.Context) string
+		Skipper      func(echo.Context) bool
+		Keys         []gojwk.Key
 	}
 
 	stsPostData struct {
@@ -62,168 +60,268 @@ type (
 
 	// User is a representation of the useful user data returned in an id token
 	User struct {
-		Username  string
-		FirstName string
-		LastName  string
-		Email     string
-		Groups    []string
-		Data      map[string]interface{}
+		Username        string
+		FirstName       string
+		LastName        string
+		Email           string
+		Groups          []string
+		Data            map[string]interface{}
+		IsAuthenticated bool
+		IsStale         bool
 	}
 
 	sessionStore struct {
 		IDToken *activeDirectoryClaims
 		Groups  []MemberGroup
 	}
+
+	//AuthContext extends echo.Context to contain a reference to user information
+	AuthContext struct {
+		echo.Context
+	}
+
+	authValues struct {
+		User        *User
+		clientID    string
+		tenantID    string
+		redirectURI func(echo.Context) string
+		authority   string
+	}
 )
 
-var sessionStoreKey = "authenticatekey"
+const (
+	gracePeriod     = 24 * time.Hour
+	sessionStoreKey = "echo-azure-active-directory-session-key"
+	urlTemplate     = ("https://login.microsoftonline.com/%s/oauth2/authorize?" +
+		"client_id=%s&response_type=id_token+code&redirect_uri=%s" +
+		"&response_mode=form_post&scope=openid&state=%s&nonce=%s")
+)
 
-// Init : returns an ActiveDirectory struct to be used outside the package
-func Init(settings *AuthSettings) *ActiveDirectory {
-	auth := &ActiveDirectory{}
-	auth.ClientID = settings.ClientID
-	auth.TenantID = settings.TenantID
-	auth.RedirectURI = settings.RedirectURI
-	auth.ClientSecret = settings.ClientSecret
+var contextStoreKey = uuid.New().String()
+
+// EchoADPreMiddleware is echo pre-middleware
+func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
+	a := &activeDirectory{}
+	a.ClientID = settings.ClientID
+	a.TenantID = settings.TenantID
+	a.ClientSecret = settings.ClientSecret
 	if settings.Skipper == nil {
-		auth.Skipper = func(c echo.Context) bool { return false }
+		a.Skipper = func(c echo.Context) bool { return false }
 	} else {
-		auth.Skipper = settings.Skipper
+		a.Skipper = settings.Skipper
 	}
-	if settings.IgnoreTokenLifetime == true {
-		auth.IgnoreTokenLifetime = true
-	} else {
-		auth.IgnoreTokenLifetime = false
-	}
+
 	gob.Register(sessionStore{})
 	gob.Register(activeDirectoryClaims{})
 	gob.Register(MemberGroup{})
-	return auth
-}
 
-// ActiveDirectoryAuthentication is echo middleware
-func (a *ActiveDirectory) ActiveDirectoryAuthentication(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		if a.sessionIsAuthenticated(c) || a.Skipper(c) {
-			return next(c)
-		}
+	authority := fmt.Sprintf(urlTemplate, settings.TenantID, settings.ClientID, "%s", "%s", "%s")
 
-		r := c.Request()
-
-		if r.Method == "GET" {
-			sess := session.Default(c)
-			nonce := uuid.New().String()
-			sess.Set("auth_nonce", nonce)
-			sess.Save()
-			return a.redirectToIdentityProvider(c, nonce)
-		}
-
-		if r.Method == "POST" {
-			var form stsPostData
-			if err := c.Bind(&form); err != nil {
-				// If we can't bind, the POST was not from the authentication authority
-				return c.String(http.StatusUnauthorized, "Unauthorized")
+	// This is the pre-middleware that listens for a login redirect from the authority
+	// we also supply some data to the context based on initialization to perform the redirect
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(ec echo.Context) error {
+			c := &AuthContext{ec}
+			// Must be re-done to reset the function from the one that pulls state directly
+			if settings.RedirectURI == nil {
+				a.RedirectURI = defaultRedirectFunc
+			} else {
+				a.RedirectURI = settings.RedirectURI
 			}
-
-			token, err := jwt.ParseWithClaims(form.IDToken, &activeDirectoryClaims{}, func(token *jwt.Token) (interface{}, error) {
-				return a.getKey(token.Header["kid"].(string))
+			c.Set(contextStoreKey, &authValues{
+				c.User(),
+				a.ClientID,
+				a.TenantID,
+				a.RedirectURI,
+				authority,
 			})
-			if err != nil {
-				msg := "id_token invalid or absent"
-				return c.String(http.StatusInternalServerError, msg)
-			}
 
-			if claims, ok := token.Claims.(*activeDirectoryClaims); ok && token.Valid {
-				// The token signature has been verified, but check that the nonce was
-				// generated by us to fend against claim impersonation
-				sess := session.Default(c)
-				sentNonce, _ := uuid.Parse(sess.Get("auth_nonce").(string))
-				receivedNonce, _ := uuid.Parse(claims.Nonce)
-				if sentNonce == receivedNonce {
-					a.authenticateSession(c, claims, form.Code)
-					return c.Redirect(http.StatusFound, form.State)
+			if c.Request().Method == "POST" {
+				var form stsPostData
+				if err := c.Bind(&form); err != nil {
+					// If we can't bind, the POST was not from the authentication authority
+					return next(c)
 				}
+
+				token, err := jwt.ParseWithClaims(
+					form.IDToken,
+					&activeDirectoryClaims{},
+					func(token *jwt.Token) (interface{}, error) {
+						a.RedirectURI = func(c echo.Context) string { return form.State }
+						return a.getKey(token.Header["kid"].(string))
+					})
+				if err != nil {
+					msg := "id_token invalid or absent"
+					return c.String(http.StatusInternalServerError, msg)
+				}
+
+				if claims, ok := token.Claims.(*activeDirectoryClaims); ok && token.Valid {
+					// The token signature has been verified, but check that the nonce was
+					// generated by us to fend against claim impersonation
+					sess := session.Default(c)
+					sentNonce, _ := uuid.Parse(sess.Get("auth_nonce").(string))
+					receivedNonce, _ := uuid.Parse(claims.Nonce)
+					if sentNonce == receivedNonce {
+						groups, _ := a.getGroups(form.Code)
+						sess.Set(sessionStoreKey, &sessionStore{
+							IDToken: claims,
+							Groups:  groups,
+						})
+						sess.Save()
+						c.Request().Method = "GET"
+						return next(ec)
+					}
+				}
+				return c.String(http.StatusUnauthorized, "Authentication failed")
 			}
-
-			msg := "Authentication failed"
-			return c.String(http.StatusUnauthorized, msg)
+			return next(ec)
 		}
-
-		msg := "Unauthorized"
-		return c.String(http.StatusUnauthorized, msg)
 	}
 }
 
-// GetUser returns a truncated list of user claims
-func GetUser(c echo.Context) User {
-	sess := session.Default(c)
+// User returns the user attributed to the given context
+func (ac AuthContext) User() *User {
+	// Retrieve data from session, if it exists
+	sess := session.Default(ac)
+	if sess == nil {
+		return defaultAnonymousUser()
+	}
 	store := sess.Get(sessionStoreKey)
 	if store == nil {
-		return User{}
+		return defaultAnonymousUser()
+	}
+	storeData, ok := store.(*sessionStore)
+	if !ok {
+		return defaultAnonymousUser()
 	}
 
-	storeData := store.(sessionStore)
+	// Determine validity
+	expiresAt := storeData.IDToken.StandardClaims.ExpiresAt
 
-	names := []string{}
+	// If we are past the grace period, return default user and wipe session
+	if expiresAt <= time.Now().Add(-gracePeriod).Unix() {
+		return defaultAnonymousUser()
+	}
+
+	/* It is up to the handler to decide how to handle an authenticated, stale user.
+	 * The preferred behaviour is to accept a form submission but not continue the
+	 * session without checking with the authority. Echo does not expose an easy
+	 * way to do this automagically.
+	 */
+	stale := false
+	if expiresAt < time.Now().Unix() {
+		stale = true
+	}
+
+	groupNames := []string{}
 
 	for _, group := range storeData.Groups {
-		names = append(names, group.DisplayName)
+		groupNames = append(groupNames, group.DisplayName)
 	}
 
-	return User{
-		LastName:  storeData.IDToken.FamilyName,
-		FirstName: storeData.IDToken.GivenName,
-		Username:  storeData.IDToken.UniqueName,
-		Email:     storeData.IDToken.UPN,
-		Groups:    names,
+	return &User{
+		LastName:        storeData.IDToken.FamilyName,
+		FirstName:       storeData.IDToken.GivenName,
+		Username:        storeData.IDToken.UniqueName,
+		Email:           storeData.IDToken.UPN,
+		Groups:          groupNames,
+		IsAuthenticated: true,
+		IsStale:         stale,
 	}
 }
 
-// SignOut redirects the client to the signout URL, which then performs a subsequent redirect
-func (a *ActiveDirectory) SignOut(c echo.Context, redirectURI string) error {
-	signOutURL := "https://login.microsoftonline.com/%s/oauth2/v2.0/logout?post_logout_redirect_uri=%s"
-	return c.Redirect(http.StatusFound, fmt.Sprint(signOutURL, a.TenantID, redirectURI))
+// Protect wrapps handlers to verify authentication at the group or route level.
+// it does not provide authorization, but ensures the data required to asses
+// permissions is present.
+func Protect(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		// AJAX requests never trigger session validation
+		if c.Request().Header.Get("X-Requested-With") == "xmlhttprequest" {
+			return protectXHR(c, next)
+		}
+		// GET requests always trigger session validation
+		if c.Request().Method == "GET" {
+			return protectGET(c, next)
+		}
+		// For POST requests, we accept data but require session refresh before subsequent loads
+		if c.Request().Method == "POST" {
+			return protectPOST(c, next)
+		}
+		return echo.NewHTTPError(echo.ErrMethodNotAllowed.Code, "The request scheme is not supported by the server.")
+	}
 }
 
-func (a *ActiveDirectory) sessionIsAuthenticated(c echo.Context) bool {
+func protectXHR(ec echo.Context, next echo.HandlerFunc) error {
+	c := &AuthContext{ec}
+	user := c.User()
+	if !user.IsAuthenticated {
+		return echo.NewHTTPError(echo.ErrUnauthorized.Code, echo.ErrUnauthorized.Message)
+	}
+	return next(ec)
+}
+
+func protectGET(ec echo.Context, next echo.HandlerFunc) error {
+	c := &AuthContext{ec}
+	user := c.User()
+	fmt.Printf("GET: %+v\n", user)
+	if !user.IsAuthenticated || user.IsStale {
+		return IdentityProviderRedirect(ec)
+	}
+	return next(ec)
+}
+
+func protectPOST(ec echo.Context, next echo.HandlerFunc) error {
+	c := &AuthContext{ec}
+	user := c.User()
+	if !user.IsAuthenticated {
+		return echo.NewHTTPError(echo.ErrUnauthorized.Code, echo.ErrUnauthorized.Message)
+	}
+	if user.IsStale {
+		defer expireSession(ec)
+	}
+	return next(ec)
+}
+
+func expireSession(c echo.Context) {
 	sess := session.Default(c)
-	store := sess.Get(sessionStoreKey)
-	if store == nil {
-		return false
-	}
-
-	storeData := store.(sessionStore)
-
-	expiresAt := storeData.IDToken.StandardClaims.ExpiresAt
-	notBefore := storeData.IDToken.StandardClaims.NotBefore
-
-	if expiresAt > time.Now().Unix() {
-		return true
-	}
-
-	if a.IgnoreTokenLifetime && (time.Now().Unix() > notBefore) {
-		return true
-	}
-
-	return false
-}
-
-func (a *ActiveDirectory) authenticateSession(c echo.Context, claims *activeDirectoryClaims, code string) {
-	sess := session.Default(c)
-	groups, _ := a.getGroups(code)
-	sess.Set(sessionStoreKey, &sessionStore{
-		IDToken: claims,
-		Groups:  groups,
-	})
+	sess.Set(sessionStoreKey, nil)
 	sess.Save()
 }
 
-func (a *ActiveDirectory) redirectToIdentityProvider(c echo.Context, nonce string) error {
-	fstring := ("https://login.microsoftonline.com/%s/oauth2/authorize?" +
-		"client_id=%s&response_type=id_token+code&redirect_uri=%s" +
-		"&response_mode=form_post&scope=openid&state=%s&nonce=%s")
+// IdentityProviderRedirect sets a nonce for a session and redirects to the Authority
+func IdentityProviderRedirect(ec echo.Context) error {
+	sess := session.Default(ec)
+	nonce := uuid.New().String()
+	sess.Set("auth_nonce", nonce)
+	sess.Save()
 
-	authEndpoint := fmt.Sprintf(fstring, a.TenantID, a.ClientID, a.RedirectURI, c.Request().URL.Path, nonce)
+	store := ec.Get(contextStoreKey)
+	if store == nil {
+		return echo.NewHTTPError(500, "Misconfigured pipeline.")
+	}
+	values, ok := store.(*authValues)
+	if !ok {
+		return echo.NewHTTPError(500, "Misconfigured pipeline.")
+	}
+	redirectURI := values.redirectURI(ec)
+	authEndpoint := fmt.Sprintf(values.authority, redirectURI, redirectURI, nonce)
 
-	return c.Redirect(http.StatusFound, authEndpoint)
+	return ec.Redirect(http.StatusFound, authEndpoint)
+}
+
+func defaultRedirectFunc(c echo.Context) string {
+	request := c.Request()
+	return c.Scheme() + "://" + request.Host + request.URL.Path
+}
+
+func defaultAnonymousUser() *User {
+	return &User{
+		LastName:        "",
+		FirstName:       "",
+		Username:        "",
+		Email:           "",
+		Groups:          []string{},
+		IsAuthenticated: false,
+		IsStale:         true,
+	}
 }

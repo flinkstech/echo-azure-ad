@@ -51,7 +51,7 @@ var accessTokenURI = "https://login.microsoftonline.com/%s/oauth2/v2.0/token"
 var memberGroupsURI = "https://graph.microsoft.com/v1.0/me/getMemberGroups"
 var objectByIDURI = "https://graph.microsoft.com/v1.0/directoryObjects/getByIds"
 
-func (a *ActiveDirectory) getGroups(code string) ([]MemberGroup, error) {
+func (a *activeDirectory) getGroups(code string) ([]MemberGroup, error) {
 	accessToken, err := a.getAccessToken(code)
 	if err != nil {
 		return nil, err
@@ -65,7 +65,7 @@ func (a *ActiveDirectory) getGroups(code string) ([]MemberGroup, error) {
 	return getGroupsByID(accessToken, memberGroupIDs)
 }
 
-func (a *ActiveDirectory) getMemberGroupIDs(accessToken string) ([]string, error) {
+func (a *activeDirectory) getMemberGroupIDs(accessToken string) ([]string, error) {
 	requestJSON, err := json.Marshal(&memberGroupsPostJSON{
 		SecurityEnabledOnly: false,
 	})
@@ -103,7 +103,7 @@ func (a *ActiveDirectory) getMemberGroupIDs(accessToken string) ([]string, error
 	return structuredData.Values, nil
 }
 
-func (a *ActiveDirectory) getAccessToken(code string) (string, error) {
+func (a *activeDirectory) getAccessToken(code string) (string, error) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 
 	tokenGrant := fmt.Sprintf(accessTokenURI, a.TenantID)
@@ -112,7 +112,7 @@ func (a *ActiveDirectory) getAccessToken(code string) (string, error) {
 		ClientID:     a.ClientID,
 		Scope:        "User.Read Group.Read.All",
 		Tenant:       a.TenantID,
-		RedirectURI:  a.RedirectURI,
+		RedirectURI:  a.RedirectURI(nil),
 		GrantType:    "authorization_code",
 		Code:         code,
 		ClientSecret: a.ClientSecret,
@@ -129,6 +129,7 @@ func (a *ActiveDirectory) getAccessToken(code string) (string, error) {
 	for key, value := range data {
 		values.Add(key, value.(string))
 	}
+
 	req, err := http.NewRequest("POST", tokenGrant, strings.NewReader(values.Encode()))
 	if err != nil {
 		return "", err
