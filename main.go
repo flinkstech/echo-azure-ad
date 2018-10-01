@@ -28,7 +28,7 @@ type (
 		ClientID     string
 		TenantID     string
 		ClientSecret string
-		RedirectURI  func(echo.Context) string
+		RedirectURI  string
 		Skipper      func(echo.Context) bool
 		Keys         []gojwk.Key
 	}
@@ -84,7 +84,7 @@ type (
 		User        *User
 		clientID    string
 		tenantID    string
-		redirectURI func(echo.Context) string
+		redirectURI string
 		authority   string
 	}
 )
@@ -122,17 +122,11 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(ec echo.Context) error {
 			c := &AuthContext{ec}
-			// Must be re-done to reset the function from the one that pulls state directly
-			if settings.RedirectURI == nil {
-				a.RedirectURI = defaultRedirectFunc
-			} else {
-				a.RedirectURI = settings.RedirectURI
-			}
 			c.Set(contextStoreKey, &authValues{
-				c.User(),
+				c.user(),
 				a.ClientID,
 				a.TenantID,
-				a.RedirectURI,
+				settings.RedirectURI(ec),
 				authority,
 			})
 
@@ -147,7 +141,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 					form.IDToken,
 					&activeDirectoryClaims{},
 					func(token *jwt.Token) (interface{}, error) {
-						a.RedirectURI = func(c echo.Context) string { return form.State }
+						a.RedirectURI = form.State
 						return a.getKey(token.Header["kid"].(string))
 					})
 				if err != nil {
@@ -163,11 +157,26 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 					receivedNonce, _ := uuid.Parse(claims.Nonce)
 					if sentNonce == receivedNonce {
 						groups, _ := a.getGroups(form.Code)
+						// Add user to session for future requests
 						sess.Set(sessionStoreKey, &sessionStore{
 							IDToken: claims,
 							Groups:  groups,
 						})
 						sess.Save()
+						// Add user to context store for the current request
+						c.Set(contextStoreKey, &authValues{
+							userFromClaims(&sessionStore{
+								IDToken: claims,
+								Groups:  groups,
+							}),
+							a.ClientID,
+							a.TenantID,
+							settings.RedirectURI(ec),
+							authority,
+						})
+						// Fool echo into routing to a GET route.
+						// state=%s can be extended to include the original method
+						// And perhaps Microsoft will preserve submitted form data
 						c.Request().Method = "GET"
 						return next(ec)
 					}
@@ -179,8 +188,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 	}
 }
 
-// User returns the user attributed to the given context
-func (ac AuthContext) User() *User {
+func (ac AuthContext) user() *User {
 	// Retrieve data from session, if it exists
 	sess := session.Default(ac)
 	if sess == nil {
@@ -190,11 +198,16 @@ func (ac AuthContext) User() *User {
 	if store == nil {
 		return defaultAnonymousUser()
 	}
-	storeData, ok := store.(*sessionStore)
+
+	storeData, ok := store.(sessionStore)
 	if !ok {
 		return defaultAnonymousUser()
 	}
 
+	return userFromClaims(&storeData)
+}
+
+func userFromClaims(storeData *sessionStore) *User {
 	// Determine validity
 	expiresAt := storeData.IDToken.StandardClaims.ExpiresAt
 
@@ -204,9 +217,9 @@ func (ac AuthContext) User() *User {
 	}
 
 	/* It is up to the handler to decide how to handle an authenticated, stale user.
-	 * The preferred behaviour is to accept a form submission but not continue the
-	 * session without checking with the authority. Echo does not expose an easy
-	 * way to do this automagically.
+	* The preferred behaviour is to accept a form submission but not continue the
+	* session without checking with the authority. Echo does not expose an easy
+	* way to do this automagically.
 	 */
 	stale := false
 	if expiresAt < time.Now().Unix() {
@@ -228,6 +241,21 @@ func (ac AuthContext) User() *User {
 		IsAuthenticated: true,
 		IsStale:         stale,
 	}
+}
+
+// User returns the user attributed to the given context
+// the context store is checked first for the case
+// where the user was just assigned by the middleware
+// and cannot yet be retrieved from the session
+func (ac AuthContext) User() *User {
+	store := ac.Get(contextStoreKey)
+	if store != nil {
+		values, ok := store.(*authValues)
+		if ok && values.User.IsAuthenticated {
+			return values.User
+		}
+	}
+	return ac.user()
 }
 
 // Protect wrapps handlers to verify authentication at the group or route level.
@@ -263,7 +291,6 @@ func protectXHR(ec echo.Context, next echo.HandlerFunc) error {
 func protectGET(ec echo.Context, next echo.HandlerFunc) error {
 	c := &AuthContext{ec}
 	user := c.User()
-	fmt.Printf("GET: %+v\n", user)
 	if !user.IsAuthenticated || user.IsStale {
 		return IdentityProviderRedirect(ec)
 	}
@@ -303,7 +330,7 @@ func IdentityProviderRedirect(ec echo.Context) error {
 	if !ok {
 		return echo.NewHTTPError(500, "Misconfigured pipeline.")
 	}
-	redirectURI := values.redirectURI(ec)
+	redirectURI := values.redirectURI
 	authEndpoint := fmt.Sprintf(values.authority, redirectURI, redirectURI, nonce)
 
 	return ec.Redirect(http.StatusFound, authEndpoint)

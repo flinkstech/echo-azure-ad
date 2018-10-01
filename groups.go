@@ -112,7 +112,7 @@ func (a *activeDirectory) getAccessToken(code string) (string, error) {
 		ClientID:     a.ClientID,
 		Scope:        "User.Read Group.Read.All",
 		Tenant:       a.TenantID,
-		RedirectURI:  a.RedirectURI(nil),
+		RedirectURI:  a.RedirectURI,
 		GrantType:    "authorization_code",
 		Code:         code,
 		ClientSecret: a.ClientSecret,
