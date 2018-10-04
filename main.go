@@ -86,6 +86,7 @@ type (
 		tenantID    string
 		redirectURI string
 		authority   string
+		skipper     func(c echo.Context) bool
 	}
 )
 
@@ -128,6 +129,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 				a.TenantID,
 				settings.RedirectURI(ec),
 				authority,
+				a.Skipper,
 			})
 
 			if c.Request().Method == "POST" {
@@ -173,6 +175,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 							a.TenantID,
 							settings.RedirectURI(ec),
 							authority,
+							a.Skipper,
 						})
 						// Fool echo into routing to a GET route.
 						// state=%s can be extended to include the original method
@@ -262,7 +265,16 @@ func (ac AuthContext) User() *User {
 // it does not provide authorization, but ensures the data required to asses
 // permissions is present.
 func Protect(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
+	return func(ec echo.Context) error {
+		// Test against skipper, skip protection if true
+		c := &AuthContext{ec}
+		store := c.Get(contextStoreKey)
+		if store != nil {
+			values, ok := store.(*authValues)
+			if ok && values.skipper(c) {
+				return next(ec)
+			}
+		}
 		// AJAX requests never trigger session validation
 		if c.Request().Header.Get("X-Requested-With") == "xmlhttprequest" {
 			return protectXHR(c, next)
