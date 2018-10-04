@@ -1,8 +1,10 @@
 package authenticate
 
 import (
+	"bytes"
 	"encoding/gob"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"time"
 
@@ -133,10 +135,20 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 			})
 
 			if c.Request().Method == "POST" {
+				var bodyBytes []byte
+				if c.Request().Body != nil {
+					bodyBytes, _ = ioutil.ReadAll(c.Request().Body)
+				}
+				c.Request().Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
+
 				var form stsPostData
-				if err := c.Bind(&form); err != nil {
+				err := c.Bind(&form)
+
+				c.Request().Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
+
+				if err != nil || !(form.IDToken != "" && form.Code != "" && form.State != "" && form.SessionState != "") {
 					// If we can't bind, the POST was not from the authentication authority
-					return next(c)
+					return next(ec)
 				}
 
 				token, err := jwt.ParseWithClaims(
