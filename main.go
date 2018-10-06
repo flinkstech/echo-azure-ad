@@ -125,8 +125,9 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(ec echo.Context) error {
 			c := &AuthContext{ec}
+			user := c.userFromSession()
 			c.Set(contextStoreKey, &authValues{
-				c.userFromSession(),
+				user,
 				a.ClientID,
 				a.TenantID,
 				settings.RedirectURI(ec),
@@ -134,7 +135,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 				a.Skipper,
 			})
 
-			if c.Request().Method == "POST" {
+			if !user.IsAuthenticated && c.Request().Method == "POST" {
 				var bodyBytes []byte
 				if c.Request().Body != nil {
 					bodyBytes, _ = ioutil.ReadAll(c.Request().Body)
@@ -191,7 +192,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 						})
 						// Fool echo into routing to a GET route.
 						// state=%s can be extended to include the original method
-						// And perhaps Microsoft will preserve submitted form data
+						// and POST data, but this is limited by url encoded form limits
 						c.Request().Method = "GET"
 						return next(ec)
 					}
