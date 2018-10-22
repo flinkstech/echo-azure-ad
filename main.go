@@ -136,7 +136,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 				a.Skipper,
 			})
 
-			if !user.IsAuthenticated && c.Request().Method == "POST" {
+			if !user.IsAuthenticated && c.Request().Method == http.MethodPost {
 				var bodyBytes []byte
 				if c.Request().Body != nil {
 					bodyBytes, _ = ioutil.ReadAll(c.Request().Body)
@@ -194,7 +194,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 						// Fool echo into routing to a GET route.
 						// state=%s can be extended to include the original method
 						// and POST data, but this is limited by url encoded form limits
-						ec.Request().Method = "GET"
+						ec.Request().Method = http.MethodGet
 						return next(ec)
 					}
 				}
