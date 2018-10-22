@@ -136,7 +136,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 				a.Skipper,
 			})
 
-			if !user.IsAuthenticated && c.Request().Method == http.MethodPost {
+			if c.Request().Method == http.MethodPost {
 				var bodyBytes []byte
 				if c.Request().Body != nil {
 					bodyBytes, _ = ioutil.ReadAll(c.Request().Body)
@@ -150,6 +150,14 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 
 				if err != nil || !(form.IDToken != "" && form.Code != "" && form.State != "" && form.SessionState != "") {
 					// If we can't bind, the POST was not from the authentication authority
+					return next(ec)
+				}
+
+				// If the form is valid, tell Echo that we want the GET route
+				ec.Request().Method = http.MethodGet
+
+				// If these conditions are met, it's because an old GET-converted POST was refreshed
+				if user.IsAuthenticated && !user.IsStale {
 					return next(ec)
 				}
 
@@ -191,10 +199,6 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 							authority,
 							a.Skipper,
 						})
-						// Fool echo into routing to a GET route.
-						// state=%s can be extended to include the original method
-						// and POST data, but this is limited by url encoded form limits
-						ec.Request().Method = http.MethodGet
 						return next(ec)
 					}
 				}
