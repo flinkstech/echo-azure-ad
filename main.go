@@ -3,6 +3,7 @@ package authenticate
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -193,7 +194,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 						// Fool echo into routing to a GET route.
 						// state=%s can be extended to include the original method
 						// and POST data, but this is limited by url encoded form limits
-						c.Request().Method = "GET"
+						ec.Request().Method = "GET"
 						return next(ec)
 					}
 				}
@@ -300,6 +301,15 @@ func Protect(next echo.HandlerFunc) echo.HandlerFunc {
 		if c.Request().Method == "POST" {
 			return protectPOST(c, next)
 		}
+		// PUT and DELETE requests do not accept stale sessions because they alter existing data
+		if c.Request().Method == "PUT" {
+			return protectPOST(c, next)
+		}
+		// As an aside, it may be wise to delegate this logic to the calling package in the future
+		// and is recommended in forks
+		if c.Request().Method == "DELETE" {
+			return protectDELETE(c, next)
+		}
 		return echo.NewHTTPError(echo.ErrMethodNotAllowed.Code, "The request scheme is not supported by the server.")
 	}
 }
@@ -329,12 +339,37 @@ func protectPOST(ec echo.Context, next echo.HandlerFunc) error {
 		return echo.NewHTTPError(echo.ErrUnauthorized.Code, echo.ErrUnauthorized.Message)
 	}
 	if user.IsStale {
-		defer expireSession(ec)
+		defer ExpireSession(ec)
 	}
 	return next(ec)
 }
 
-func expireSession(c echo.Context) {
+func protectPUT(ec echo.Context, next echo.HandlerFunc) error {
+	c := &AuthContext{ec}
+	user := c.User()
+	if !user.IsAuthenticated {
+		return echo.NewHTTPError(echo.ErrUnauthorized.Code, echo.ErrUnauthorized.Message)
+	}
+	if user.IsStale {
+		defer ExpireSession(ec)
+	}
+	return next(ec)
+}
+
+func protectDELETE(ec echo.Context, next echo.HandlerFunc) error {
+	c := &AuthContext{ec}
+	user := c.User()
+	if !user.IsAuthenticated {
+		return echo.NewHTTPError(echo.ErrUnauthorized.Code, echo.ErrUnauthorized.Message)
+	}
+	if user.IsStale {
+		defer ExpireSession(ec)
+	}
+	return echo.NewHTTPError(echo.ErrUnauthorized.Code, echo.ErrUnauthorized.Message)
+}
+
+// ExpireSession is used to unauthenticate the user
+func ExpireSession(c echo.Context) {
 	sess := session.Default(c)
 	sess.Set(sessionStoreKey, nil)
 	sess.Save()
@@ -359,6 +394,26 @@ func IdentityProviderRedirect(ec echo.Context) error {
 	authEndpoint := fmt.Sprintf(values.authority, redirectURI, redirectURI, nonce)
 
 	return ec.Redirect(http.StatusFound, authEndpoint)
+}
+
+// IdentityProviderURL returns the url for the authority
+func IdentityProviderURL(ec echo.Context) (string, error) {
+	sess := session.Default(ec)
+	nonce := uuid.New().String()
+	sess.Set("auth_nonce", nonce)
+	sess.Save()
+
+	store := ec.Get(contextStoreKey)
+	if store == nil {
+		return "", errors.New("no context from which to determine the authentication endpoint")
+	}
+	values, ok := store.(*authValues)
+	if !ok {
+		return "", errors.New("no context from which to determine the authentication endpoint")
+	}
+	redirectURI := ec.Scheme() + "://" + ec.Request().Host
+
+	return fmt.Sprintf(values.authority, redirectURI, redirectURI, nonce), nil
 }
 
 func defaultRedirectFunc(c echo.Context) string {
