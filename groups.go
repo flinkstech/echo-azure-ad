@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,7 +25,7 @@ type (
 
 	accessTokenResponse struct {
 		TokenType    string `json:"token_type"`
-		ExpiresIn    string `json:"expires_in"`
+		ExpiresIn    int    `json:"expires_in"`
 		IDToken      string `json:"id_token"`
 		Scope        string `json:"scope"`
 		AccessToken  string `json:"access_token"`
@@ -58,19 +61,52 @@ var memberGroupsURI = "https://graph.microsoft.com/v1.0/me/getMemberGroups"
 var objectByIDURI = "https://graph.microsoft.com/v1.0/directoryObjects/getByIds"
 
 func (a *activeDirectory) getGroups(code string) ([]MemberGroup, string, string, error) {
+	var permissions string
+	if a.ExtraPermissions == "" {
+		permissions = "User.Read Group.Read.All offline_access"
+	} else {
+		permissions = "User.Read Group.Read.All" + fmt.Sprintf(" %s", a.ExtraPermissions)
+	}
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	accessTokenURL := fmt.Sprintf(accessURLTemplate, a.ClientID, "User.Read Group.Read.All", code, a.RedirectURI, a.ClientSecret)
-	req, err := http.NewRequest("POST", accessTokenURL, nil)
+
+	tokenGrant := fmt.Sprintf(accessTokenURI, a.TenantID)
+
+	requestJSON, err := json.Marshal(&accessTokenPostJSON{
+		ClientID:     a.ClientID,
+		Scope:        permissions,
+		Tenant:       a.TenantID,
+		RedirectURI:  a.RedirectURI,
+		GrantType:    "authorization_code",
+		Code:         code,
+		ClientSecret: a.ClientSecret,
+	})
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	values := url.Values{}
+	var data map[string]interface{}
+	if err = json.Unmarshal([]byte(requestJSON), &data); err != nil {
+		return nil, "", "", err
+	}
+	for key, value := range data {
+		values.Add(key, value.(string))
+	}
+
+	req, err := http.NewRequest("POST", tokenGrant, strings.NewReader(values.Encode()))
 	if err != nil {
 		return nil, "", "", err
 	}
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Add("Content-Length", strconv.Itoa(len(values.Encode())))
+
 	res, err := httpClient.Do(req)
 	if err != nil {
 		return nil, "", "", err
 	}
 
 	byt, err := ioutil.ReadAll(res.Body)
+
 	res.Body.Close()
 	if err != nil {
 		return nil, "", "", err
@@ -128,63 +164,6 @@ func (a *activeDirectory) getMemberGroupIDs(accessToken string) ([]string, error
 
 	return structuredData.Values, nil
 }
-
-/*func (a *activeDirectory) getAccessToken(code string) (string, string, error) {
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-
-	tokenGrant := fmt.Sprintf(accessTokenURI, a.TenantID)
-
-	requestJSON, err := json.Marshal(&accessTokenPostJSON{
-		ClientID:     a.ClientID,
-		Scope:        "User.Read Group.Read.All",
-		Tenant:       a.TenantID,
-		RedirectURI:  a.RedirectURI,
-		GrantType:    "authorization_code",
-		Code:         code,
-		ClientSecret: a.ClientSecret,
-	})
-	if err != nil {
-		return "", "", err
-	}
-
-	values := url.Values{}
-	var data map[string]interface{}
-	if err = json.Unmarshal([]byte(requestJSON), &data); err != nil {
-		return "", "", err
-	}
-	for key, value := range data {
-		values.Add(key, value.(string))
-	}
-
-	req, err := http.NewRequest("POST", tokenGrant, strings.NewReader(values.Encode()))
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Add("Content-Length", strconv.Itoa(len(values.Encode())))
-
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-
-	byt, err := ioutil.ReadAll(res.Body)
-
-	res.Body.Close()
-	if err != nil {
-		return "", "", err
-	}
-
-	err = json.Unmarshal(byt, &data)
-	if err != nil {
-		return "", "", err
-	}
-	fmt.Printf("%+v\n", data)
-	accessToken := data["access_token"]
-	refreshToken := data["refresh_token"]
-
-	return accessToken.(string), refreshToken.(string), nil
-}*/
 
 func getGroupsByID(accessToken string, groupIDs []string) ([]MemberGroup, error) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}

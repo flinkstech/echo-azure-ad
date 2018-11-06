@@ -19,23 +19,25 @@ import (
 type (
 	// AuthSettings is used as an argument to Init
 	AuthSettings struct {
-		ClientID     string
-		TenantID     string
-		ClientSecret string
-		RedirectURI  func(echo.Context) string
-		Skipper      func(echo.Context) bool
-		Resource     string
-		Mode         string
+		ClientID         string
+		TenantID         string
+		ClientSecret     string
+		RedirectURI      func(echo.Context) string
+		Skipper          func(echo.Context) bool
+		Resource         string
+		Mode             string
+		ExtraPermissions string
 	}
 
 	// ActiveDirectory is like AuthSettings but with methods and stores internal states
 	activeDirectory struct {
-		ClientID     string
-		TenantID     string
-		ClientSecret string
-		RedirectURI  string
-		Skipper      func(echo.Context) bool
-		Keys         []gojwk.Key
+		ClientID         string
+		TenantID         string
+		ClientSecret     string
+		RedirectURI      string
+		Skipper          func(echo.Context) bool
+		Keys             []gojwk.Key
+		ExtraPermissions string
 	}
 
 	stsPostData struct {
@@ -117,6 +119,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 	a.ClientID = settings.ClientID
 	a.TenantID = settings.TenantID
 	a.ClientSecret = settings.ClientSecret
+	a.ExtraPermissions = settings.ExtraPermissions
 	if settings.Skipper == nil {
 		a.Skipper = func(c echo.Context) bool { return false }
 	} else {
@@ -170,7 +173,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 					sentNonce, _ := uuid.Parse(authNonce.(string))
 					receivedNonce, _ := uuid.Parse(claims.Nonce)
 					if sentNonce == receivedNonce {
-						groups, accessToken, refreshToken, _ := a.getGroups(form.Code)
+						groups, accessToken, refreshToken, err := a.getGroups(form.Code)
 						// Add user to session for future requests
 						sess.Set(sessionStoreKey, &sessionStore{
 							IDToken:         claims,
@@ -219,8 +222,8 @@ func (ac AuthContext) userFromSession() *User {
 
 	if expiresAt < time.Now().Unix() {
 		accessToken, refreshToken, expiresOn, err := refreshExpiry(storeData.refreshToken, storeData.refreshEndpoint)
+		fmt.Printf("PLEASE SEND TO ETIENNE:\n%s\n%s\n%s\n%s\nEND PLEASE SEND\n", groups, accessToken, refreshToken, err)
 		if err != nil {
-			fmt.Printf("%s\n", err)
 			sess.Set(sessionStoreKey, nil)
 			sess.Save()
 			return defaultAnonymousUser()
