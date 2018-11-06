@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +64,14 @@ type (
 		jwt.StandardClaims
 	}
 
+	truncatedADClaims struct {
+		FamilyName string `json:"family_name"`
+		GivenName  string `json:"given_name"`
+		Name       string `json:"name"`
+		UniqueName string `json:"unique_name"`
+		UPN        string `json:"upn"`
+	}
+
 	// User is a representation of the useful user data returned in an id token
 	User struct {
 		Username        string
@@ -72,17 +79,15 @@ type (
 		LastName        string
 		Email           string
 		Groups          []string
-		Data            map[string]interface{}
 		IsAuthenticated bool
 	}
 
 	sessionStore struct {
-		IDToken         *activeDirectoryClaims
-		Groups          []MemberGroup
-		expiry          int64
-		accessToken     string
-		refreshToken    string
-		refreshEndpoint string
+		IDToken      *truncatedADClaims
+		Groups       []MemberGroup
+		Expiry       int64
+		AccessToken  string
+		RefreshToken string
 	}
 
 	//AuthContext extends echo.Context to contain a reference to user information
@@ -137,7 +142,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(ec echo.Context) error {
 			c := &AuthContext{ec}
-			user := c.userFromSession()
+			user := a.userFromSession(c)
 			c.Set(contextStoreKey, &authValues{
 				user,
 				a.ClientID,
@@ -173,15 +178,24 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 					sentNonce, _ := uuid.Parse(authNonce.(string))
 					receivedNonce, _ := uuid.Parse(claims.Nonce)
 					if sentNonce == receivedNonce {
-						groups, accessToken, refreshToken, err := a.getGroups(form.Code)
+						groups, accessToken, refreshToken, expiresIn, err := a.getGroups(form.Code)
+						if err != nil {
+							return c.String(http.StatusInternalServerError, "failed to reach the authentication server")
+						}
 						// Add user to session for future requests
+						smallClaims := &truncatedADClaims{
+							FamilyName: claims.FamilyName,
+							GivenName:  claims.GivenName,
+							Name:       claims.Name,
+							UniqueName: claims.UniqueName,
+							UPN:        claims.UPN,
+						}
 						sess.Set(sessionStoreKey, &sessionStore{
-							IDToken:         claims,
-							Groups:          groups,
-							expiry:          claims.StandardClaims.ExpiresAt,
-							accessToken:     accessToken,
-							refreshToken:    refreshToken,
-							refreshEndpoint: fmt.Sprintf(refreshURLTemplate, settings.TenantID, a.ClientID, "%s", a.ClientSecret),
+							IDToken:      smallClaims,
+							Groups:       groups,
+							Expiry:       time.Now().Add(time.Duration(expiresIn) * time.Second).Unix(),
+							AccessToken:  accessToken,
+							RefreshToken: refreshToken,
 						})
 						sess.Save()
 
@@ -202,7 +216,7 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 	}
 }
 
-func (ac AuthContext) userFromSession() *User {
+func (a *activeDirectory) userFromSession(ac *AuthContext) *User {
 	// Retrieve data from session, if it exists
 	sess := session.Default(ac)
 	if sess == nil {
@@ -218,26 +232,22 @@ func (ac AuthContext) userFromSession() *User {
 	}
 
 	// Determine validity
-	expiresAt := storeData.IDToken.StandardClaims.ExpiresAt
-
+	expiresAt := storeData.Expiry
 	if expiresAt < time.Now().Unix() {
-		accessToken, refreshToken, expiresOn, err := refreshExpiry(storeData.refreshToken, storeData.refreshEndpoint)
-		fmt.Printf("PLEASE SEND TO ETIENNE:\n%s\n%s\n%s\n%s\nEND PLEASE SEND\n", groups, accessToken, refreshToken, err)
+		accessToken, refreshToken, expiresIn, err := a.refreshExpiry(storeData.RefreshToken)
 		if err != nil {
 			sess.Set(sessionStoreKey, nil)
 			sess.Save()
 			return defaultAnonymousUser()
 		}
-		newExpiry, err := strconv.ParseInt(expiresOn, 10, 64)
 		sess.Set(sessionStoreKey, &sessionStore{
-			IDToken:         storeData.IDToken, // Unchanged
-			Groups:          storeData.Groups,  // Unchanged
-			expiry:          newExpiry,
-			accessToken:     accessToken,
-			refreshToken:    refreshToken,
-			refreshEndpoint: storeData.refreshEndpoint, // Unchanged
+			IDToken:      storeData.IDToken, // Unchanged
+			Groups:       storeData.Groups,  // Unchanged
+			Expiry:       time.Now().Add(time.Duration(expiresIn) * time.Second).Unix(),
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
 		})
-		sess.Save()
+		err = sess.Save()
 	}
 
 	groupNames := []string{}
@@ -311,7 +321,7 @@ func GetAccessToken(c echo.Context) (string, error) {
 	if !ok {
 		return "", errors.New("access token not found")
 	}
-	return storeData.accessToken, nil
+	return storeData.AccessToken, nil
 }
 
 // IdentityProviderRedirect sets a nonce for a session and redirects to the Authority

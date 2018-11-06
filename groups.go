@@ -23,9 +23,19 @@ type (
 		ClientSecret string `json:"client_secret"`
 	}
 
+	refreshTokenPostJSON struct {
+		ClientID     string `json:"client_id"`
+		Scope        string `json:"scope"`
+		Tenant       string `json:"tenant"`
+		RedirectURI  string `json:"redirect_uri"`
+		GrantType    string `json:"grant_type"`
+		RefreshToken string `json:"refresh_token"`
+		ClientSecret string `json:"client_secret"`
+	}
+
 	accessTokenResponse struct {
 		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
+		ExpiresIn    int64  `json:"expires_in"`
 		IDToken      string `json:"id_token"`
 		Scope        string `json:"scope"`
 		AccessToken  string `json:"access_token"`
@@ -60,7 +70,7 @@ var accessTokenURI = "https://login.microsoftonline.com/%s/oauth2/v2.0/token"
 var memberGroupsURI = "https://graph.microsoft.com/v1.0/me/getMemberGroups"
 var objectByIDURI = "https://graph.microsoft.com/v1.0/directoryObjects/getByIds"
 
-func (a *activeDirectory) getGroups(code string) ([]MemberGroup, string, string, error) {
+func (a *activeDirectory) getGroups(code string) ([]MemberGroup, string, string, int64, error) {
 	var permissions string
 	if a.ExtraPermissions == "" {
 		permissions = "User.Read Group.Read.All offline_access"
@@ -69,7 +79,7 @@ func (a *activeDirectory) getGroups(code string) ([]MemberGroup, string, string,
 	}
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 
-	tokenGrant := fmt.Sprintf(accessTokenURI, a.TenantID)
+	refreshEndpoint := fmt.Sprintf(accessTokenURI, a.TenantID)
 
 	requestJSON, err := json.Marshal(&accessTokenPostJSON{
 		ClientID:     a.ClientID,
@@ -81,50 +91,51 @@ func (a *activeDirectory) getGroups(code string) ([]MemberGroup, string, string,
 		ClientSecret: a.ClientSecret,
 	})
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", 0, err
 	}
 
 	values := url.Values{}
 	var data map[string]interface{}
 	if err = json.Unmarshal([]byte(requestJSON), &data); err != nil {
-		return nil, "", "", err
+		return nil, "", "", 0, err
 	}
 	for key, value := range data {
 		values.Add(key, value.(string))
 	}
 
-	req, err := http.NewRequest("POST", tokenGrant, strings.NewReader(values.Encode()))
+	req, err := http.NewRequest("POST", refreshEndpoint, strings.NewReader(values.Encode()))
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", 0, err
 	}
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Add("Content-Length", strconv.Itoa(len(values.Encode())))
 
 	res, err := httpClient.Do(req)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", 0, err
 	}
 
 	byt, err := ioutil.ReadAll(res.Body)
 
 	res.Body.Close()
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", 0, err
 	}
 
 	responseData := &accessTokenResponse{}
 	err = json.Unmarshal(byt, &responseData)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", 0, err
 	}
 
 	memberGroupIDs, err := a.getMemberGroupIDs(responseData.AccessToken)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", 0, err
 	}
 
 	groups, err := getGroupsByID(responseData.AccessToken, memberGroupIDs)
-	return groups, responseData.AccessToken, responseData.RefreshToken, nil
+
+	return groups, responseData.AccessToken, responseData.RefreshToken, responseData.ExpiresIn, nil
 }
 
 func (a *activeDirectory) getMemberGroupIDs(accessToken string) ([]string, error) {
