@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -21,6 +18,15 @@ type (
 		GrantType    string `json:"grant_type"`
 		Code         string `json:"code"`
 		ClientSecret string `json:"client_secret"`
+	}
+
+	accessTokenResponse struct {
+		TokenType    string `json:"token_type"`
+		ExpiresIn    string `json:"expires_in"`
+		IDToken      string `json:"id_token"`
+		Scope        string `json:"scope"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	memberGroupsPostJSON struct {
@@ -51,18 +57,38 @@ var accessTokenURI = "https://login.microsoftonline.com/%s/oauth2/v2.0/token"
 var memberGroupsURI = "https://graph.microsoft.com/v1.0/me/getMemberGroups"
 var objectByIDURI = "https://graph.microsoft.com/v1.0/directoryObjects/getByIds"
 
-func (a *activeDirectory) getGroups(code string) ([]MemberGroup, error) {
-	accessToken, err := a.getAccessToken(code)
+func (a *activeDirectory) getGroups(code string) ([]MemberGroup, string, string, error) {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	accessTokenURL := fmt.Sprintf(accessURLTemplate, a.ClientID, "User.Read Group.Read.All", code, a.RedirectURI, a.ClientSecret)
+	req, err := http.NewRequest("POST", accessTokenURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", "", err
+	}
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, "", "", err
 	}
 
-	memberGroupIDs, err := a.getMemberGroupIDs(accessToken)
+	byt, err := ioutil.ReadAll(res.Body)
+	res.Body.Close()
 	if err != nil {
-		return nil, err
+		return nil, "", "", err
 	}
 
-	return getGroupsByID(accessToken, memberGroupIDs)
+	responseData := &accessTokenResponse{}
+	err = json.Unmarshal(byt, &responseData)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	memberGroupIDs, err := a.getMemberGroupIDs(responseData.AccessToken)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	groups, err := getGroupsByID(responseData.AccessToken, memberGroupIDs)
+	return groups, responseData.AccessToken, responseData.RefreshToken, nil
 }
 
 func (a *activeDirectory) getMemberGroupIDs(accessToken string) ([]string, error) {
@@ -103,7 +129,7 @@ func (a *activeDirectory) getMemberGroupIDs(accessToken string) ([]string, error
 	return structuredData.Values, nil
 }
 
-func (a *activeDirectory) getAccessToken(code string) (string, error) {
+/*func (a *activeDirectory) getAccessToken(code string) (string, string, error) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 
 	tokenGrant := fmt.Sprintf(accessTokenURI, a.TenantID)
@@ -118,13 +144,13 @@ func (a *activeDirectory) getAccessToken(code string) (string, error) {
 		ClientSecret: a.ClientSecret,
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	values := url.Values{}
 	var data map[string]interface{}
 	if err = json.Unmarshal([]byte(requestJSON), &data); err != nil {
-		return "", err
+		return "", "", err
 	}
 	for key, value := range data {
 		values.Add(key, value.(string))
@@ -132,32 +158,33 @@ func (a *activeDirectory) getAccessToken(code string) (string, error) {
 
 	req, err := http.NewRequest("POST", tokenGrant, strings.NewReader(values.Encode()))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Add("Content-Length", strconv.Itoa(len(values.Encode())))
 
 	res, err := httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	byt, err := ioutil.ReadAll(res.Body)
 
 	res.Body.Close()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	err = json.Unmarshal(byt, &data)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-
+	fmt.Printf("%+v\n", data)
 	accessToken := data["access_token"]
+	refreshToken := data["refresh_token"]
 
-	return accessToken.(string), nil
-}
+	return accessToken.(string), refreshToken.(string), nil
+}*/
 
 func getGroupsByID(accessToken string, groupIDs []string) ([]MemberGroup, error) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
