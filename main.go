@@ -197,7 +197,9 @@ func EchoADPreMiddleware(settings *AuthSettings) echo.MiddlewareFunc {
 							AccessToken:  accessToken,
 							RefreshToken: refreshToken,
 						})
-						sess.Save()
+						if err := sess.Save(); err != nil {
+							fmt.Printf("%s\n", err)
+						}
 
 						return ec.HTML(http.StatusOK,
 							`<!DOCTYPE HTML5>
@@ -237,7 +239,9 @@ func (a *activeDirectory) userFromSession(ac *AuthContext) *User {
 		accessToken, refreshToken, expiresIn, err := a.refreshExpiry(storeData.RefreshToken)
 		if err != nil {
 			sess.Set(sessionStoreKey, nil)
-			sess.Save()
+			if err := sess.Save(); err != nil {
+				fmt.Printf("SESSION EXPIRED\n%s\n", err)
+			}
 			return defaultAnonymousUser()
 		}
 		sess.Set(sessionStoreKey, &sessionStore{
@@ -247,7 +251,9 @@ func (a *activeDirectory) userFromSession(ac *AuthContext) *User {
 			AccessToken:  accessToken,
 			RefreshToken: refreshToken,
 		})
-		err = sess.Save()
+		if err := sess.Save(); err != nil {
+			fmt.Printf("SESSION REFRESHED\n%s\n", err)
+		}
 	}
 
 	groupNames := []string{}
@@ -296,6 +302,7 @@ func Protect(next echo.HandlerFunc) echo.HandlerFunc {
 			}
 		}
 		user := c.User()
+		fmt.Printf("PROTECT GOT USER:\n%+v\n", user)
 		if !user.IsAuthenticated {
 			return IdentityProviderRedirect(ec)
 		}
